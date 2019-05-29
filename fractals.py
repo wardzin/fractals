@@ -7,12 +7,24 @@ import imageio
 import tensorflow as tf
 import math
 from tqdm import tqdm
-from numba import guvectorize, float64, complex64, int32, float32
+from numba import jit, njit, prange, guvectorize, vectorize, float32, float64, complex64, complex128, uint8, uint16, int32, uint32, uint64, boolean
+
+
+def create_set(center, view, aspect=1.5, res=600):
+    xmin, xmax = (center[0]-view*aspect, center[0]+view*aspect)
+    ymin, ymax = (center[1]-view, center[1]+view)
+    xdist = abs(xmin) + abs(xmax)
+    ydist = abs(ymin) + abs(ymax)
+
+    coords = np.mgrid[xmin:xmax:res*aspect*1j, ymin:ymax:res*1j]
+    coords = coords[0] + coords[1]*1j
+    
+    return coords
 
 
 def mandelbrot(coords, maxiters=100, smoothing=True, bailout=2):
     val = np.zeros(coords.shape)
-    z = np.zeros(coords.shape, np.complex64)
+    z = np.zeros(coords.shape, np.complex128)
     c = coords.copy()
     thres = bailout**2
     
@@ -30,32 +42,26 @@ def mandelbrot(coords, maxiters=100, smoothing=True, bailout=2):
 
 
 def mandelbrot_gpu(coords, maxiters=100, bailout=2):
-    maxiters_array = np.ones(coords.shape, int) * maxiters
-    bailout_array = np.ones(coords.shape, int) * bailout
-    return mandelbrot_gpu_func(coords, maxiters_array, bailout_array)
+    return mandelbrot_gpu_func(coords, maxiters, bailout)
 
 
-@guvectorize([(complex64[:], int32[:], int32[:], float32[:])], '(n),(n),(n)->(n)', target='cuda')
-def mandelbrot_gpu_func(coords, maxiters_array, bailout_array, output):
-    maxiters = maxiters_array[0]
-    bailout = bailout_array[0]
+@vectorize([float64(complex128, uint16, uint8)], target='cuda')
+def mandelbrot_gpu_func(coord, maxiters, bailout):
     threshold = bailout * bailout
-    for i in range(coords.shape[0]):
-        creal = coords[i].real
-        cimag = coords[i].imag
-        zreal = 0
-        zimag = 0
-        output[i] = np.nan
-        for it in range(maxiters):
-            zreal2 = zreal*zreal
-            zimag2 = zimag*zimag
-            if zreal2 + zimag2 > threshold:
-                il = 1 / math.log(float(2))
-                lp = math.log(math.log(float(bailout)))
-                output[i] = 0.05 * (it + il*lp - il*math.log(math.log(math.sqrt(zreal2+zimag2))))
-                break
-            zimag = 2 * zreal*zimag + cimag
-            zreal = zreal2 - zimag2 + creal
+    creal = coord.real
+    cimag = coord.imag
+    zreal = 0
+    zimag = 0
+    for it in range(maxiters):
+        zreal2 = zreal*zreal
+        zimag2 = zimag*zimag
+        if zreal2 + zimag2 > threshold:
+            il = 1 / math.log(float(2))
+            lp = math.log(math.log(float(bailout)))
+            return 0.05 * (it + il*lp - il*math.log(math.log(math.sqrt(zreal2+zimag2))))
+        zimag = 2 * zreal*zimag + cimag
+        zreal = zreal2 - zimag2 + creal
+    return np.nan
 
 
 def julia(coords, c, maxiters=100, smoothing=True, bailout=2):
@@ -79,42 +85,54 @@ def julia(coords, c, maxiters=100, smoothing=True, bailout=2):
 def julia_gpu(coords, c, maxiters=100, bailout=2):
     maxiters_array = np.ones(coords.shape, int) * maxiters
     bailout_array = np.ones(coords.shape, int) * bailout
-    c_array = np.ones(coords.shape, np.complex64) * c
+    c_array = np.ones(coords.shape, np.complex128) * c
     return julia_gpu_func(coords, c_array, maxiters_array, bailout_array)
 
 
-@guvectorize([(complex64[:], complex64[:], int32[:], int32[:], float32[:])], '(n),(n),(n),(n)->(n)', target='cuda')
+# @guvectorize([(complex64[:], complex64[:], int32[:], int32[:], float32[:])], '(n),(n),(n),(n)->(n)', target='cuda')
+# def julia_gpu_func(coords, c_array, maxiters_array, bailout_array, output):
+#     maxiters = maxiters_array[0]
+#     bailout = bailout_array[0]
+#     threshold = bailout * bailout
+#     creal = c_array[0].real
+#     cimag = c_array[0].imag
+#     for i in range(coords.shape[0]):
+#         zreal = coords[i].real
+#         zimag = coords[i].imag
+#         output[i] = np.nan
+#         for it in range(maxiters):
+#             zreal2 = zreal*zreal
+#             zimag2 = zimag*zimag
+#             if zreal2 + zimag2 > threshold:
+#                 il = 1 / math.log(float(2))
+#                 lp = math.log(math.log(float(bailout)))
+#                 output[i] = 0.05 * (it + il*lp - il*math.log(math.log(math.sqrt(zreal2+zimag2))))
+#                 break
+#             zimag = 2 * zreal*zimag + cimag
+#             zreal = zreal2 - zimag2 + creal
+
+
+@guvectorize([(complex128[:], complex64[:], int32[:], int32[:], float64[:])], '(n),(n),(n),(n)->(n)', target='cuda')
 def julia_gpu_func(coords, c_array, maxiters_array, bailout_array, output):
     maxiters = maxiters_array[0]
     bailout = bailout_array[0]
     threshold = bailout * bailout
-    creal = c_array[0].real
-    cimag = c_array[0].imag
+    c = c_array[0]
     for i in range(coords.shape[0]):
-        zreal = coords[i].real
-        zimag = coords[i].imag
+        z = coords[i]
         output[i] = np.nan
+        z_prev = complex(0, 0)
         for it in range(maxiters):
-            zreal2 = zreal*zreal
-            zimag2 = zimag*zimag
+            zreal2 = z.real*z.real
+            zimag2 = z.imag*z.imag
             if zreal2 + zimag2 > threshold:
                 il = 1 / math.log(float(2))
                 lp = math.log(math.log(float(bailout)))
                 output[i] = 0.05 * (it + il*lp - il*math.log(math.log(math.sqrt(zreal2+zimag2))))
                 break
-            zimag = 2 * zreal*zimag + cimag
-            zreal = zreal2 - zimag2 + creal
-
-def create_set(center, view, aspect=1.5, res=600):
-    xmin, xmax = (center[0]-view*aspect, center[0]+view*aspect)
-    ymin, ymax = (center[1]-view, center[1]+view)
-    xdist = abs(xmin) + abs(xmax)
-    ydist = abs(ymin) + abs(ymax)
-
-    coords = np.mgrid[xmin:xmax:res*aspect*1j, ymin:ymax:res*1j]
-    coords = coords[0] + coords[1]*1j
-    
-    return coords.astype(np.complex64)
+            z_temp = z
+            z = z*z + c.real + c.imag * z_prev
+            z_prev = z_temp
 
 
 def transform(val, density=1, shift=0):
@@ -185,7 +203,7 @@ def colorize(val, colormap='mandelbrot'):
     return px.round().astype(np.uint8)
 
 
-def draw(val, name):
+def draw(val, filename=None):
     plt.figure(figsize=(18, 12))
     fig = plt.imshow(val, interpolation='lanczos')
     plt.axis('off')
@@ -193,16 +211,6 @@ def draw(val, name):
     fig.axes.get_yaxis().set_visible(False)
 
     plt.show()
-    imageio.imsave('media/'+name+'.png', val)
+    if filename:
+        imageio.imsave('media/'+filename+'.png', val)
 #     plt.imsave(name+'.png', val)
-
-
-def julia_frame(args):
-    coords, a = args
-    # c = 0.7885 * np.exp(a*1j)
-    c = 0.5 * np.exp(a*1j)
-    val = julia_gpu(coords, c, maxiters=500, bailout=128).T
-    val = transform(val, density=0.25)
-    # val = colorize(val, colormap='mandelbrot')
-    val = cmap_colorize(val, cmap='jet')
-    return val

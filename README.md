@@ -1,1 +1,1 @@
-fractals
+GPU-accelerated Python fractal renderer
